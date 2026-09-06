@@ -1,0 +1,48 @@
+
+# Compiled objects and kernel modules
+*.o
+*.a
+*.so
+*.ko
+*.mod
+*.mod.c
+*.order
+*.symvers
+.*.cmd
+.tmp_versions/
+
+# CMake and generated builds
+build/
+out/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+
+# Downloaded source and dependencies
+.deps/
+.cache/
+
+# Virtual-machine images and runtime files
+vm/images/
+vm/overlays/
+vm/*.qcow2
+vm/*.img
+vm/*.iso
+vm/*.pid
+vm/*.sock
+vm/*.log
+
+# Python-generated files
+__pycache__/
+*.pyc
+
+# Editor and operating-system files
+*.swp
+*~
+.DS_Store
+
+# Crash dumps
+core
+core.*
