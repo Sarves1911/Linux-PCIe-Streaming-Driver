@@ -8,6 +8,7 @@
 #include <linux/slab.h>
 #include <linux/miscdevice.h>
 #include <linux/fs.h>
+#include "../include/uapi/qstream_ioctl.h"
 
 static const struct pci_device_id qstream_pci_ids[] = {
     { PCI_DEVICE(QSTREAM_PCI_VENDOR_ID, QSTREAM_PCI_DEVICE_ID) },
@@ -29,9 +30,39 @@ struct qstream_device {
     u64 dropped;
     struct miscdevice miscdev;
 };
+static long qstream_ioctl(struct file *file,
+                          unsigned int cmd,
+                          unsigned long arg)
+{
+    struct miscdevice *miscdev = file->private_data;
+    struct qstream_device *qdev =
+        container_of(miscdev, struct qstream_device, miscdev);
+
+    switch (cmd) {
+    case QSTREAM_IOCTL_START:
+        iowrite32(QSTREAM_CONTROL_START,
+                  qdev->bar0 + QSTREAM_REG_CONTROL);
+
+        dev_info(&qdev->pdev->dev,
+                 "qstream: START requested by userspace\n");
+        return 0;
+
+    case QSTREAM_IOCTL_STOP:
+        iowrite32(QSTREAM_CONTROL_STOP,
+                  qdev->bar0 + QSTREAM_REG_CONTROL);
+
+        dev_info(&qdev->pdev->dev,
+                 "qstream: STOP requested by userspace\n");
+        return 0;
+
+    default:
+        return -ENOTTY;
+    }
+}
 
 static const struct file_operations qstream_fops = {
     .owner = THIS_MODULE,
+    .unlocked_ioctl = qstream_ioctl,
 };
 
 MODULE_DEVICE_TABLE(pci, qstream_pci_ids);
@@ -194,15 +225,15 @@ static int qstream_probe(struct pci_dev *pdev,
 
     dev_info(&pdev->dev, "qstream: registered /dev/qstream0\n");
     
-    iowrite32(QSTREAM_CONTROL_START,
-          bar0 + QSTREAM_REG_CONTROL);
+    // iowrite32(QSTREAM_CONTROL_START,
+    //       bar0 + QSTREAM_REG_CONTROL);
 
-    stream_status =
-        ioread32(bar0 + QSTREAM_REG_STATUS);
+    // stream_status =
+    //     ioread32(bar0 + QSTREAM_REG_STATUS);
 
-    dev_info(&pdev->dev,
-            "qstream: streaming started, status=0x%08x\n",
-            stream_status);
+    // dev_info(&pdev->dev,
+    //         "qstream: streaming started, status=0x%08x\n",
+    //         stream_status);
 
     return 0;
 }
@@ -219,7 +250,7 @@ static void qstream_remove(struct pci_dev *pdev)
               bar0 + QSTREAM_REG_IRQ_ACK);
 
     misc_deregister(&qdev->miscdev);
-    
+
     free_irq(pdev->irq, pdev);
     dev_info(&pdev->dev,
          "qstream: ring stored=%llu pending=%llu dropped=%llu\n",
