@@ -3,15 +3,28 @@
 #include "qom/object.h"
 #include "qstream_wire.h"
 #include "qemu/module.h"
+#include "qemu/timer.h"
 #define TYPE_QSTREAM_DEVICE "qstream"
 
 OBJECT_DECLARE_SIMPLE_TYPE(QStreamState, QSTREAM_DEVICE)
+
+#define QSTREAM_FIFO_CAPACITY 64u
+#define QSTREAM_FIFO_MASK     (QSTREAM_FIFO_CAPACITY - 1u)
+
+typedef struct QStreamRecord {
+    uint32_t words[QSTREAM_RECORD_WORDS];
+} QStreamRecord;
 
 struct QStreamState {
     PCIDevice parent_obj;
     MemoryRegion bar0;
     uint32_t scratch;
     uint32_t irq_status;
+    QStreamRecord fifo[QSTREAM_FIFO_CAPACITY];
+    uint64_t fifo_head;
+    uint64_t fifo_tail;
+    uint64_t next_sequence;
+    uint32_t generation;
 };
 static void qstream_update_irq(QStreamState *s)
 {
@@ -33,14 +46,121 @@ static void qstream_ack_irq(QStreamState *s, uint32_t bits)
     qstream_update_irq(s);
 }
 
+static uint32_t qstream_fifo_count(const QStreamState *s)
+{
+    return (uint32_t)(s->fifo_head - s->fifo_tail);
+}
+
+static bool qstream_fifo_empty(const QStreamState *s)
+{
+    return s->fifo_head == s->fifo_tail;
+}
+
+static bool qstream_fifo_full(const QStreamState *s)
+{
+    return qstream_fifo_count(s) >= QSTREAM_FIFO_CAPACITY;
+}
+
+static QStreamRecord *qstream_fifo_front(QStreamState *s)
+{
+    uint64_t index;
+
+    if (qstream_fifo_empty(s))
+        return NULL;
+
+    index = s->fifo_tail & QSTREAM_FIFO_MASK;
+    return &s->fifo[index];
+}
+
+static void qstream_fifo_pop(QStreamState *s)
+{
+    if (qstream_fifo_empty(s))
+        return;
+
+    s->fifo_tail++;
+
+    if (qstream_fifo_empty(s))
+        s->irq_status &= ~QSTREAM_IRQ_DATA_READY;
+
+    qstream_update_irq(s);
+}
+
+static uint32_t qstream_record_checksum(const QStreamRecord *record)
+{
+    uint32_t checksum = 0;
+    unsigned int word;
+
+    for (word = 0; word < QSTREAM_WORD_CHECKSUM; word++)
+        checksum ^= record->words[word];
+
+    return checksum;
+}
+
+static void qstream_generate_one(QStreamState *s)
+{
+    QStreamRecord *record;
+    uint64_t sequence;
+    uint64_t timestamp;
+    uint64_t index;
+
+    if (qstream_fifo_full(s))
+        return;
+
+    index = s->fifo_head & QSTREAM_FIFO_MASK;
+    record = &s->fifo[index];
+
+    memset(record, 0, sizeof(*record));
+
+    sequence = s->next_sequence++;
+    timestamp = (uint64_t)qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+
+    record->words[QSTREAM_WORD_SEQUENCE_LO] =
+        (uint32_t)sequence;
+    record->words[QSTREAM_WORD_SEQUENCE_HI] =
+        (uint32_t)(sequence >> 32);
+
+    record->words[QSTREAM_WORD_TIMESTAMP_LO] =
+        (uint32_t)timestamp;
+    record->words[QSTREAM_WORD_TIMESTAMP_HI] =
+        (uint32_t)(timestamp >> 32);
+
+    record->words[QSTREAM_WORD_VALUE] =
+        0xA5000000u | (uint32_t)(sequence & 0xFFFFu);
+    record->words[QSTREAM_WORD_GENERATION] =
+        s->generation;
+    record->words[QSTREAM_WORD_FLAGS] = 0;
+
+    record->words[QSTREAM_WORD_CHECKSUM] =
+        qstream_record_checksum(record);
+
+    s->fifo_head++;
+
+    qstream_raise_irq(s, QSTREAM_IRQ_DATA_READY);
+}
+
 static uint64_t qstream_mmio_read(void *opaque,
                                   hwaddr addr,
                                   unsigned size)
 {
     QStreamState *s = opaque;
+    QStreamRecord *record;
+    unsigned int word;
 
     if (size != 4)
         return ~0ULL;
+
+    if (addr >= QSTREAM_REG_DATA_BASE &&
+        addr < QSTREAM_REG_DATA_BASE + QSTREAM_RECORD_SIZE) {
+        record = qstream_fifo_front(s);
+
+        if (!record)
+            return ~0ULL;
+
+        word = (unsigned int)
+            ((addr - QSTREAM_REG_DATA_BASE) / 4u);
+
+        return record->words[word];
+    }
 
     switch (addr) {
     case QSTREAM_REG_MAGIC:
@@ -54,6 +174,9 @@ static uint64_t qstream_mmio_read(void *opaque,
 
     case QSTREAM_REG_IRQ_STATUS:
         return s->irq_status;
+
+    case QSTREAM_REG_FIFO_COUNT:
+        return qstream_fifo_count(s);
 
     default:
         return ~0ULL;
@@ -83,11 +206,20 @@ static void qstream_mmio_write(void *opaque,
         qstream_ack_irq(s, (uint32_t)value);
         break;
 
+    case QSTREAM_REG_CONTROL:
+        if (value & QSTREAM_CONTROL_GENERATE_ONE)
+            qstream_generate_one(s);
+        break;
+
+    case QSTREAM_REG_FIFO_POP:
+        if (value & QSTREAM_FIFO_POP_ONE)
+            qstream_fifo_pop(s);
+        break;
+
     default:
         break;
     }
 }
-
 static const MemoryRegionOps qstream_mmio_ops = {
     .read = qstream_mmio_read,
     .write = qstream_mmio_write,
@@ -110,6 +242,11 @@ static void qstream_realize(PCIDevice *pdev, Error **errp)
 
     s->scratch = 0;
     s->irq_status = 0;
+    memset(s->fifo, 0, sizeof(s->fifo));
+    s->fifo_head = 0;
+    s->fifo_tail = 0;
+    s->next_sequence = 0;
+    s->generation = 0;
 
     memory_region_init_io(&s->bar0,
                           OBJECT(s),

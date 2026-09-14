@@ -15,22 +15,67 @@ static irqreturn_t qstream_irq_handler(int irq, void *data)
 {
     struct pci_dev *pdev = data;
     void __iomem *bar0 = pci_get_drvdata(pdev);
+    u32 words[QSTREAM_RECORD_WORDS];
     u32 status;
+    u32 count;
+    u32 checksum = 0;
+    u64 sequence;
+    u64 timestamp;
+    unsigned int word;
 
     status = ioread32(bar0 + QSTREAM_REG_IRQ_STATUS);
 
     if (!status)
         return IRQ_NONE;
 
-    iowrite32(status, bar0 + QSTREAM_REG_IRQ_ACK);
+    count = ioread32(bar0 + QSTREAM_REG_FIFO_COUNT);
 
-    dev_info(&pdev->dev,
-             "qstream: interrupt handled, status=0x%08x\n",
-             status);
+    if (!count) {
+        dev_warn(&pdev->dev,
+                 "qstream: DATA_READY with empty FIFO\n");
+
+        iowrite32(status, bar0 + QSTREAM_REG_IRQ_ACK);
+        return IRQ_HANDLED;
+    }
+
+    for (word = 0; word < QSTREAM_RECORD_WORDS; word++) {
+        words[word] =
+            ioread32(bar0 + QSTREAM_REG_DATA_WORD(word));
+    }
+
+    for (word = 0; word < QSTREAM_WORD_CHECKSUM; word++)
+        checksum ^= words[word];
+
+    sequence =
+        ((u64)words[QSTREAM_WORD_SEQUENCE_HI] << 32) |
+        words[QSTREAM_WORD_SEQUENCE_LO];
+
+    timestamp =
+        ((u64)words[QSTREAM_WORD_TIMESTAMP_HI] << 32) |
+        words[QSTREAM_WORD_TIMESTAMP_LO];
+
+    if (checksum != words[QSTREAM_WORD_CHECKSUM]) {
+        dev_err(&pdev->dev,
+                "qstream: sequence=%llu checksum mismatch\n",
+                (unsigned long long)sequence);
+    } else {
+        dev_info(&pdev->dev,
+                 "qstream: record sequence=%llu timestamp=%llu "
+                 "value=0x%08x generation=%u checksum OK\n",
+                 (unsigned long long)sequence,
+                 (unsigned long long)timestamp,
+                 words[QSTREAM_WORD_VALUE],
+                 words[QSTREAM_WORD_GENERATION]);
+    }
+
+    iowrite32(QSTREAM_FIFO_POP_ONE,
+              bar0 + QSTREAM_REG_FIFO_POP);
+
+    iowrite32(status,
+              bar0 + QSTREAM_REG_IRQ_ACK);
 
     return IRQ_HANDLED;
 }
-
 static int qstream_probe(struct pci_dev *pdev,
                          const struct pci_device_id *id)
 {
@@ -96,10 +141,9 @@ static int qstream_probe(struct pci_dev *pdev,
     dev_info(&pdev->dev,
             "qstream: IRQ %d registered\n",
             pdev->irq);
-
-    /* Temporary test: ask qstream to raise interrupt reason bit 0. */
-    iowrite32(QSTREAM_IRQ_TEST,
-            bar0 + QSTREAM_REG_IRQ_RAISE);
+/* Temporary test: ask the card to generate one real record. */
+    iowrite32(QSTREAM_CONTROL_GENERATE_ONE,
+            bar0 + QSTREAM_REG_CONTROL);
 
     return 0;
 }
