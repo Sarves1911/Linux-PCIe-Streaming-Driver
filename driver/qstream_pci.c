@@ -6,6 +6,8 @@
 #define QSTREAM_RING_CAPACITY 1024u
 #define QSTREAM_RING_MASK (QSTREAM_RING_CAPACITY - 1u)
 #include <linux/slab.h>
+#include <linux/miscdevice.h>
+#include <linux/fs.h>
 
 static const struct pci_device_id qstream_pci_ids[] = {
     { PCI_DEVICE(QSTREAM_PCI_VENDOR_ID, QSTREAM_PCI_DEVICE_ID) },
@@ -25,6 +27,11 @@ struct qstream_device {
     u64 head;
     u64 tail;
     u64 dropped;
+    struct miscdevice miscdev;
+};
+
+static const struct file_operations qstream_fops = {
+    .owner = THIS_MODULE,
 };
 
 MODULE_DEVICE_TABLE(pci, qstream_pci_ids);
@@ -165,7 +172,28 @@ static int qstream_probe(struct pci_dev *pdev,
     dev_info(&pdev->dev,
             "qstream: IRQ %d registered\n",
             pdev->irq);
+    
+    qdev->miscdev.minor = MISC_DYNAMIC_MINOR;
+    qdev->miscdev.name = "qstream0";
+    qdev->miscdev.fops = &qstream_fops;
+    qdev->miscdev.parent = &pdev->dev;
+    qdev->miscdev.mode = 0660;
 
+    ret = misc_register(&qdev->miscdev);
+    if (ret) {
+        dev_err(&pdev->dev,
+                "qstream: failed to register /dev/qstream0: %d\n",
+                ret);
+
+        free_irq(pdev->irq, pdev);
+        pci_iounmap(pdev, bar0);
+        pci_release_region(pdev, 0);
+        pci_disable_device(pdev);
+        return ret;
+    }
+
+    dev_info(&pdev->dev, "qstream: registered /dev/qstream0\n");
+    
     iowrite32(QSTREAM_CONTROL_START,
           bar0 + QSTREAM_REG_CONTROL);
 
@@ -190,6 +218,8 @@ static void qstream_remove(struct pci_dev *pdev)
     iowrite32(~0u,
               bar0 + QSTREAM_REG_IRQ_ACK);
 
+    misc_deregister(&qdev->miscdev);
+    
     free_irq(pdev->irq, pdev);
     dev_info(&pdev->dev,
          "qstream: ring stored=%llu pending=%llu dropped=%llu\n",
