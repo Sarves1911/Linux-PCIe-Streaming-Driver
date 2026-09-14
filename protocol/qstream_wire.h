@@ -25,9 +25,13 @@
 #define QSTREAM_REG_FIFO_COUNT  0x1C
 #define QSTREAM_REG_DATA_BASE   0x20
 #define QSTREAM_REG_FIFO_POP    0x40
+#define QSTREAM_REG_STATUS 0x44
+#define QSTREAM_STATUS_RUNNING (1u << 0)
 
 #define QSTREAM_CONTROL_GENERATE_ONE (1u << 0)
 #define QSTREAM_FIFO_POP_ONE          (1u << 0)
+#define QSTREAM_CONTROL_START (1u << 1)
+#define QSTREAM_CONTROL_STOP  (1u << 2)
 
 #define QSTREAM_RECORD_WORDS 8u
 #define QSTREAM_RECORD_SIZE  32u
@@ -43,5 +47,6 @@
 
 #define QSTREAM_REG_DATA_WORD(word) \
     (QSTREAM_REG_DATA_BASE + ((word) * 4u))
+
 
 #endif

@@ -85,6 +85,7 @@ static int qstream_probe(struct pci_dev *pdev,
     u32 scratch_value = 0x12345678;
     u32 scratch_response;
     int ret;
+    u32 stream_status;
 
     ret = pci_enable_device(pdev);
     if (ret) {
@@ -141,21 +142,35 @@ static int qstream_probe(struct pci_dev *pdev,
     dev_info(&pdev->dev,
             "qstream: IRQ %d registered\n",
             pdev->irq);
-/* Temporary test: ask the card to generate one real record. */
-    iowrite32(QSTREAM_CONTROL_GENERATE_ONE,
-            bar0 + QSTREAM_REG_CONTROL);
+
+    iowrite32(QSTREAM_CONTROL_START,
+          bar0 + QSTREAM_REG_CONTROL);
+
+    stream_status =
+        ioread32(bar0 + QSTREAM_REG_STATUS);
+
+    dev_info(&pdev->dev,
+            "qstream: streaming started, status=0x%08x\n",
+            stream_status);
 
     return 0;
 }
 
-
 static void qstream_remove(struct pci_dev *pdev)
 {
-    void __iomem *bar0 = pci_get_drvdata(pdev);   
+    void __iomem *bar0 = pci_get_drvdata(pdev);
+
+    iowrite32(QSTREAM_CONTROL_STOP,
+              bar0 + QSTREAM_REG_CONTROL);
+
+    iowrite32(~0u,
+              bar0 + QSTREAM_REG_IRQ_ACK);
+
+    free_irq(pdev->irq, pdev);
+
     pci_iounmap(pdev, bar0);
     pci_release_region(pdev, 0);
     pci_disable_device(pdev);
-    free_irq(pdev->irq, pdev);
 
     dev_info(&pdev->dev, "qstream: device removed\n");
 }

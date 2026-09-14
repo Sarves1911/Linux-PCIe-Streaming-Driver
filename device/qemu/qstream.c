@@ -4,6 +4,7 @@
 #include "qstream_wire.h"
 #include "qemu/module.h"
 #include "qemu/timer.h"
+#define QSTREAM_STREAM_PERIOD_MS 250
 #define TYPE_QSTREAM_DEVICE "qstream"
 
 OBJECT_DECLARE_SIMPLE_TYPE(QStreamState, QSTREAM_DEVICE)
@@ -25,6 +26,8 @@ struct QStreamState {
     uint64_t fifo_tail;
     uint64_t next_sequence;
     uint32_t generation;
+    QEMUTimer *stream_timer;
+    bool running;
 };
 static void qstream_update_irq(QStreamState *s)
 {
@@ -138,6 +141,45 @@ static void qstream_generate_one(QStreamState *s)
     qstream_raise_irq(s, QSTREAM_IRQ_DATA_READY);
 }
 
+static void qstream_schedule_next(QStreamState *s)
+{
+    int64_t deadline;
+
+    deadline =
+        qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) +
+        QSTREAM_STREAM_PERIOD_MS;
+
+    timer_mod(s->stream_timer, deadline);
+}
+
+static void qstream_timer_callback(void *opaque)
+{
+    QStreamState *s = opaque;
+
+    if (!s->running)
+        return;
+
+    qstream_generate_one(s);
+
+    if (s->running)
+        qstream_schedule_next(s);
+}
+
+static void qstream_start(QStreamState *s)
+{
+    if (s->running)
+        return;
+
+    s->running = true;
+    qstream_schedule_next(s);
+}
+
+static void qstream_stop(QStreamState *s)
+{
+    s->running = false;
+    timer_del(s->stream_timer);
+}
+
 static uint64_t qstream_mmio_read(void *opaque,
                                   hwaddr addr,
                                   unsigned size)
@@ -177,6 +219,9 @@ static uint64_t qstream_mmio_read(void *opaque,
 
     case QSTREAM_REG_FIFO_COUNT:
         return qstream_fifo_count(s);
+    
+    case QSTREAM_REG_STATUS:
+        return s->running ? QSTREAM_STATUS_RUNNING : 0;
 
     default:
         return ~0ULL;
@@ -209,7 +254,14 @@ static void qstream_mmio_write(void *opaque,
     case QSTREAM_REG_CONTROL:
         if (value & QSTREAM_CONTROL_GENERATE_ONE)
             qstream_generate_one(s);
-        break;
+
+        if (value & QSTREAM_CONTROL_START)
+            qstream_start(s);
+
+        if (value & QSTREAM_CONTROL_STOP)
+            qstream_stop(s);
+
+    break;
 
     case QSTREAM_REG_FIFO_POP:
         if (value & QSTREAM_FIFO_POP_ONE)
@@ -247,6 +299,12 @@ static void qstream_realize(PCIDevice *pdev, Error **errp)
     s->fifo_tail = 0;
     s->next_sequence = 0;
     s->generation = 0;
+    s->running = false;
+
+    s->stream_timer =
+    timer_new_ms(QEMU_CLOCK_VIRTUAL,
+                 qstream_timer_callback,
+                 s);
 
     memory_region_init_io(&s->bar0,
                           OBJECT(s),
@@ -262,12 +320,25 @@ static void qstream_realize(PCIDevice *pdev, Error **errp)
                      &s->bar0);
 }
 
+static void qstream_uninit(PCIDevice *pdev)
+{
+    QStreamState *s = QSTREAM_DEVICE(pdev);
+
+    s->running = false;
+    s->irq_status = 0;
+    pci_set_irq(pdev, 0);
+
+    timer_free(s->stream_timer);
+    s->stream_timer = NULL;
+}
+
 static void qstream_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *pci_class = PCI_DEVICE_CLASS(klass);
 
     pci_class->realize = qstream_realize;
+    pci_class->exit = qstream_uninit;
     pci_class->vendor_id = QSTREAM_PCI_VENDOR_ID;
     pci_class->device_id = QSTREAM_PCI_DEVICE_ID;
     pci_class->revision = 0x01;
