@@ -11,7 +11,27 @@ struct QStreamState {
     PCIDevice parent_obj;
     MemoryRegion bar0;
     uint32_t scratch;
+    uint32_t irq_status;
 };
+static void qstream_update_irq(QStreamState *s)
+{
+    if (s->irq_status)
+        pci_set_irq(&s->parent_obj, 1);
+    else
+        pci_set_irq(&s->parent_obj, 0);
+}
+
+static void qstream_raise_irq(QStreamState *s, uint32_t bits)
+{
+    s->irq_status |= bits;
+    qstream_update_irq(s);
+}
+
+static void qstream_ack_irq(QStreamState *s, uint32_t bits)
+{
+    s->irq_status &= ~bits;
+    qstream_update_irq(s);
+}
 
 static uint64_t qstream_mmio_read(void *opaque,
                                   hwaddr addr,
@@ -32,6 +52,9 @@ static uint64_t qstream_mmio_read(void *opaque,
     case QSTREAM_REG_SCRATCH:
         return s->scratch;
 
+    case QSTREAM_REG_IRQ_STATUS:
+        return s->irq_status;
+
     default:
         return ~0ULL;
     }
@@ -50,6 +73,14 @@ static void qstream_mmio_write(void *opaque,
     switch (addr) {
     case QSTREAM_REG_SCRATCH:
         s->scratch = (uint32_t)value;
+        break;
+
+    case QSTREAM_REG_IRQ_RAISE:
+        qstream_raise_irq(s, (uint32_t)value);
+        break;
+
+    case QSTREAM_REG_IRQ_ACK:
+        qstream_ack_irq(s, (uint32_t)value);
         break;
 
     default:
@@ -78,6 +109,7 @@ static void qstream_realize(PCIDevice *pdev, Error **errp)
     QStreamState *s = QSTREAM_DEVICE(pdev);
 
     s->scratch = 0;
+    s->irq_status = 0;
 
     memory_region_init_io(&s->bar0,
                           OBJECT(s),
@@ -85,7 +117,8 @@ static void qstream_realize(PCIDevice *pdev, Error **errp)
                           s,
                           "qstream-bar0",
                           QSTREAM_BAR_SIZE);
-
+    pci_config_set_interrupt_pin(pdev->config, 1);
+    
     pci_register_bar(pdev,
                      QSTREAM_BAR_INDEX,
                      PCI_BASE_ADDRESS_SPACE_MEMORY,

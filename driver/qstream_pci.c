@@ -2,6 +2,7 @@
 #include <linux/pci.h>
 #include <linux/io.h>
 #include "../protocol/qstream_wire.h"
+#include <linux/interrupt.h>
 
 static const struct pci_device_id qstream_pci_ids[] = {
     { PCI_DEVICE(QSTREAM_PCI_VENDOR_ID, QSTREAM_PCI_DEVICE_ID) },
@@ -10,6 +11,25 @@ static const struct pci_device_id qstream_pci_ids[] = {
 
 MODULE_DEVICE_TABLE(pci, qstream_pci_ids);
 
+static irqreturn_t qstream_irq_handler(int irq, void *data)
+{
+    struct pci_dev *pdev = data;
+    void __iomem *bar0 = pci_get_drvdata(pdev);
+    u32 status;
+
+    status = ioread32(bar0 + QSTREAM_REG_IRQ_STATUS);
+
+    if (!status)
+        return IRQ_NONE;
+
+    iowrite32(status, bar0 + QSTREAM_REG_IRQ_ACK);
+
+    dev_info(&pdev->dev,
+             "qstream: interrupt handled, status=0x%08x\n",
+             status);
+
+    return IRQ_HANDLED;
+}
 
 static int qstream_probe(struct pci_dev *pdev,
                          const struct pci_device_id *id)
@@ -56,6 +76,31 @@ static int qstream_probe(struct pci_dev *pdev,
             "qstream: magic=0x%08x version=0x%08x scratch=0x%08x\n",
             magic, version, scratch_response);
 
+    ret = request_irq(pdev->irq,
+                  qstream_irq_handler,
+                  IRQF_SHARED,
+                  "qstream_pci",
+                  pdev);
+
+    if (ret) {
+        dev_err(&pdev->dev,
+                "qstream: failed to register IRQ: %d\n",
+                ret);
+
+        pci_iounmap(pdev, bar0);
+        pci_release_region(pdev, 0);
+        pci_disable_device(pdev);
+        return ret;
+    }
+
+    dev_info(&pdev->dev,
+            "qstream: IRQ %d registered\n",
+            pdev->irq);
+
+    /* Temporary test: ask qstream to raise interrupt reason bit 0. */
+    iowrite32(QSTREAM_IRQ_TEST,
+            bar0 + QSTREAM_REG_IRQ_RAISE);
+
     return 0;
 }
 
@@ -66,6 +111,7 @@ static void qstream_remove(struct pci_dev *pdev)
     pci_iounmap(pdev, bar0);
     pci_release_region(pdev, 0);
     pci_disable_device(pdev);
+    free_irq(pdev->irq, pdev);
 
     dev_info(&pdev->dev, "qstream: device removed\n");
 }
