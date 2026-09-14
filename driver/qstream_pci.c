@@ -9,6 +9,7 @@
 #include <linux/miscdevice.h>
 #include <linux/fs.h>
 #include "../include/uapi/qstream_ioctl.h"
+#include <linux/poll.h>
 
 static const struct pci_device_id qstream_pci_ids[] = {
     { PCI_DEVICE(QSTREAM_PCI_VENDOR_ID, QSTREAM_PCI_DEVICE_ID) },
@@ -29,6 +30,7 @@ struct qstream_device {
     u64 tail;
     u64 dropped;
     struct miscdevice miscdev;
+    wait_queue_head_t read_queue;
 };
 static long qstream_ioctl(struct file *file,
                           unsigned int cmd,
@@ -60,9 +62,24 @@ static long qstream_ioctl(struct file *file,
     }
 }
 
+static __poll_t qstream_poll(struct file *file, poll_table *wait)
+{
+    struct miscdevice *miscdev = file->private_data;
+    struct qstream_device *qdev =
+        container_of(miscdev, struct qstream_device, miscdev);
+
+    poll_wait(file, &qdev->read_queue, wait);
+
+    if (READ_ONCE(qdev->head) != READ_ONCE(qdev->tail))
+        return EPOLLIN | EPOLLRDNORM;
+
+    return 0;
+}
+
 static const struct file_operations qstream_fops = {
     .owner = THIS_MODULE,
     .unlocked_ioctl = qstream_ioctl,
+    .poll = qstream_poll,
 };
 
 MODULE_DEVICE_TABLE(pci, qstream_pci_ids);
@@ -109,6 +126,8 @@ static irqreturn_t qstream_irq_handler(int irq, void *data)
     } else {
         qdev->ring[qdev->head & QSTREAM_RING_MASK] = record;
         qdev->head++;
+
+        wake_up_interruptible(&qdev->read_queue);
     }
 
 consume_record:
@@ -146,6 +165,7 @@ static int qstream_probe(struct pci_dev *pdev,
         return -ENOMEM;
 
     qdev->pdev = pdev;
+    init_waitqueue_head(&qdev->read_queue);
 
     ret = pci_enable_device(pdev);
     if (ret) {
