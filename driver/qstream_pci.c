@@ -104,10 +104,19 @@ static __poll_t qstream_poll(struct file *file, poll_table *wait)
     struct miscdevice *miscdev = file->private_data;
     struct qstream_device *qdev =
         container_of(miscdev, struct qstream_device, miscdev);
+    unsigned long lock_flags;
+    bool record_available;
 
     poll_wait(file, &qdev->read_queue, wait);
 
-    if (READ_ONCE(qdev->head) != READ_ONCE(qdev->tail))
+    spin_lock_irqsave(&qdev->ring_lock, lock_flags);
+
+    record_available = qdev->head != qdev->tail;
+
+    spin_unlock_irqrestore(&qdev->ring_lock,
+                           lock_flags);
+
+    if (record_available)
         return EPOLLIN | EPOLLRDNORM;
 
     return 0;

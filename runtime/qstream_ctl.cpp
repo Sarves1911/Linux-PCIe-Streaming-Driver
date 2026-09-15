@@ -35,6 +35,8 @@ static std::uint32_t calculate_checksum(
 
 int main()
 {
+    constexpr std::uint64_t target_records = 20;
+
     int fd = open("/dev/qstream0", O_RDWR);
 
     if (fd < 0) {
@@ -78,37 +80,72 @@ int main()
         return 1;
     }
 
-    std::cout << "Streaming started; waiting for a record\n";
+    std::cout << "Streaming started\n";
 
-    struct pollfd event = {};
-    event.fd = fd;
-    event.events = POLLIN;
-
-    int poll_result = poll(&event, 1, 5000);
+    std::uint64_t processed = 0;
+    std::uint64_t checksum_errors = 0;
+    std::uint64_t sequence_gaps = 0;
+    std::uint64_t previous_sequence = 0;
+    bool have_previous_sequence = false;
     int exit_code = 0;
 
-    if (poll_result < 0) {
-        std::cerr << "poll failed: "
-                  << std::strerror(errno) << '\n';
-        exit_code = 1;
-    } else if (poll_result == 0) {
-        std::cerr << "Timed out waiting for a record\n";
-        exit_code = 1;
-    } else if (event.revents & POLLIN) {
-        std::uint64_t head =
-            __atomic_load_n(&ring->header.head,
-                            __ATOMIC_ACQUIRE);
+    while (processed < target_records && exit_code == 0) {
+        struct pollfd event = {};
+        event.fd = fd;
+        event.events = POLLIN;
+
+        int poll_result = poll(&event, 1, 5000);
+
+        if (poll_result < 0) {
+            std::cerr << "poll failed: "
+                      << std::strerror(errno) << '\n';
+            exit_code = 1;
+            break;
+        }
+
+        if (poll_result == 0) {
+            std::cerr << "Timed out waiting for records\n";
+            exit_code = 1;
+            break;
+        }
+
+        if (!(event.revents & POLLIN)) {
+            std::cerr << "Unexpected poll event: "
+                      << event.revents << '\n';
+            exit_code = 1;
+            break;
+        }
 
         std::uint64_t tail =
             __atomic_load_n(&ring->header.tail,
                             __ATOMIC_ACQUIRE);
 
-        if (head == tail) {
-            std::cerr << "Driver woke us without a record\n";
+        std::uint64_t head =
+            __atomic_load_n(&ring->header.head,
+                            __ATOMIC_ACQUIRE);
+
+        if (head < tail) {
+            std::cerr << "Invalid ring counters\n";
             exit_code = 1;
-        } else {
+            break;
+        }
+
+        std::uint64_t available = head - tail;
+
+        if (available == 0)
+            continue;
+
+        if (available > QSTREAM_RING_CAPACITY) {
+            std::cerr << "Ring contains impossible count: "
+                      << available << '\n';
+            exit_code = 1;
+            break;
+        }
+
+        for (std::uint64_t i = 0; i < available; i++) {
             const struct qstream_record &record =
-                ring->records[tail & QSTREAM_RING_MASK];
+                ring->records[(tail + i) &
+                              QSTREAM_RING_MASK];
 
             std::uint64_t sequence =
                 combine_words(
@@ -127,43 +164,60 @@ int main()
                 expected_checksum ==
                 record.words[QSTREAM_WORD_CHECKSUM];
 
+            if (!checksum_ok)
+                checksum_errors++;
+
+            if (have_previous_sequence &&
+                sequence != previous_sequence + 1) {
+                sequence_gaps++;
+            }
+
+            previous_sequence = sequence;
+            have_previous_sequence = true;
+
             std::cout
-                << "Record sequence=" << sequence
+                << "sequence=" << sequence
                 << " timestamp=" << timestamp
                 << " value=0x" << std::hex
                 << record.words[QSTREAM_WORD_VALUE]
                 << std::dec
-                << " generation="
-                << record.words[QSTREAM_WORD_GENERATION]
                 << " checksum="
                 << (checksum_ok ? "OK" : "BAD")
                 << '\n';
-
-            __u32 consumed = 1;
-
-            if (ioctl(fd,
-                      QSTREAM_IOCTL_CONSUME,
-                      &consumed) < 0) {
-                std::cerr << "CONSUME failed: "
-                          << std::strerror(errno) << '\n';
-                exit_code = 1;
-            } else {
-                std::cout << "Consumed one record\n";
-            }
         }
-    } else {
-        std::cerr << "Unexpected poll event: "
-                  << event.revents << '\n';
-        exit_code = 1;
+
+        __u32 consumed =
+            static_cast<__u32>(available);
+
+        if (ioctl(fd,
+                  QSTREAM_IOCTL_CONSUME,
+                  &consumed) < 0) {
+            std::cerr << "CONSUME failed: "
+                      << std::strerror(errno) << '\n';
+            exit_code = 1;
+            break;
+        }
+
+        processed += available;
     }
 
     if (ioctl(fd, QSTREAM_IOCTL_STOP) < 0) {
         std::cerr << "STOP failed: "
                   << std::strerror(errno) << '\n';
         exit_code = 1;
-    } else {
-        std::cout << "Streaming stopped\n";
     }
+
+    std::uint64_t dropped =
+        __atomic_load_n(&ring->header.dropped,
+                        __ATOMIC_ACQUIRE);
+
+    std::cout
+        << "Streaming stopped\n"
+        << "Summary: processed=" << processed
+        << " checksum_errors=" << checksum_errors
+        << " sequence_gaps=" << sequence_gaps
+        << " dropped=" << dropped
+        << '\n';
 
     munmap(mapping, QSTREAM_RING_MMAP_SIZE);
     close(fd);
