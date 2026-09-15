@@ -13,6 +13,7 @@
 #include <linux/mm.h>
 #include <linux/uaccess.h>
 #include <linux/spinlock.h>
+#define QSTREAM_IRQ_DRAIN_LIMIT 256u
 
 static const struct pci_device_id qstream_pci_ids[] = {
     { PCI_DEVICE(QSTREAM_PCI_VENDOR_ID, QSTREAM_PCI_DEVICE_ID) },
@@ -155,78 +156,164 @@ static const struct file_operations qstream_fops = {
 
 MODULE_DEVICE_TABLE(pci, qstream_pci_ids);
 
+// static irqreturn_t qstream_irq_handler(int irq, void *data)
+// {
+//     struct pci_dev *pdev = data;
+//     struct qstream_device *qdev = pci_get_drvdata(pdev);
+//     void __iomem *bar0 = qdev->bar0;
+//     struct qstream_record record;
+//     u32 status;
+//     u32 fifo_count;
+//     u32 checksum = 0;
+//     unsigned int i;
+//     unsigned long lock_flags;
+//     bool stored = false;
+
+//     status = ioread32(bar0 + QSTREAM_REG_IRQ_STATUS);
+
+//     if (!status)
+//         return IRQ_NONE;
+
+//     fifo_count = ioread32(bar0 + QSTREAM_REG_FIFO_COUNT);
+
+//     if (!fifo_count) {
+//         iowrite32(status, bar0 + QSTREAM_REG_IRQ_ACK);
+//         return IRQ_HANDLED;
+//     }
+
+//     for (i = 0; i < QSTREAM_RECORD_WORDS; i++) {
+//         record.words[i] =
+//             ioread32(bar0 + QSTREAM_REG_DATA_WORD(i));
+//     }
+
+//     for (i = 0; i < QSTREAM_WORD_CHECKSUM; i++)
+//         checksum ^= record.words[i];
+
+//     if (checksum != record.words[QSTREAM_WORD_CHECKSUM]) {
+//         dev_err_ratelimited(&pdev->dev,
+//                             "qstream: checksum mismatch\n");
+//         goto consume_record;
+//     }
+
+//     spin_lock_irqsave(&qdev->ring_lock, lock_flags);
+
+//     if (qdev->head - qdev->tail >= QSTREAM_RING_CAPACITY) {
+//         qdev->dropped++;
+
+//         WRITE_ONCE(qdev->shared->header.dropped,
+//                 qdev->dropped);
+//     } else {
+//         qdev->shared->records[qdev->head &
+//                             QSTREAM_RING_MASK] = record;
+
+//         qdev->head++;
+
+//         smp_store_release(&qdev->shared->header.head,
+//                         qdev->head);
+
+//         stored = true;
+//     }
+
+//     spin_unlock_irqrestore(&qdev->ring_lock, lock_flags);
+
+//     if (stored)
+//         wake_up_interruptible(&qdev->read_queue);
+//     consume_record:
+//         iowrite32(QSTREAM_FIFO_POP_ONE,
+//                 bar0 + QSTREAM_REG_FIFO_POP);
+
+//         iowrite32(status,
+//                 bar0 + QSTREAM_REG_IRQ_ACK);
+
+//         return IRQ_HANDLED;
+// }
+
 static irqreturn_t qstream_irq_handler(int irq, void *data)
 {
     struct pci_dev *pdev = data;
     struct qstream_device *qdev = pci_get_drvdata(pdev);
     void __iomem *bar0 = qdev->bar0;
     struct qstream_record record;
-    u32 status;
-    u32 fifo_count;
-    u32 checksum = 0;
-    unsigned int i;
     unsigned long lock_flags;
-    bool stored = false;
+    unsigned int drained;
+    unsigned int i;
+    u32 fifo_count;
+    u32 checksum;
+    u32 status;
+    bool wake_runtime = false;
 
     status = ioread32(bar0 + QSTREAM_REG_IRQ_STATUS);
 
     if (!status)
         return IRQ_NONE;
 
-    fifo_count = ioread32(bar0 + QSTREAM_REG_FIFO_COUNT);
+    for (drained = 0;
+         drained < QSTREAM_IRQ_DRAIN_LIMIT;
+         drained++) {
+        fifo_count =
+            ioread32(bar0 + QSTREAM_REG_FIFO_COUNT);
 
-    if (!fifo_count) {
-        iowrite32(status, bar0 + QSTREAM_REG_IRQ_ACK);
-        return IRQ_HANDLED;
-    }
+        if (!fifo_count)
+            break;
 
-    for (i = 0; i < QSTREAM_RECORD_WORDS; i++) {
-        record.words[i] =
-            ioread32(bar0 + QSTREAM_REG_DATA_WORD(i));
-    }
+        checksum = 0;
 
-    for (i = 0; i < QSTREAM_WORD_CHECKSUM; i++)
-        checksum ^= record.words[i];
+        for (i = 0; i < QSTREAM_RECORD_WORDS; i++) {
+            record.words[i] =
+                ioread32(
+                    bar0 + QSTREAM_REG_DATA_WORD(i));
+        }
 
-    if (checksum != record.words[QSTREAM_WORD_CHECKSUM]) {
-        dev_err_ratelimited(&pdev->dev,
-                            "qstream: checksum mismatch\n");
-        goto consume_record;
-    }
+        for (i = 0; i < QSTREAM_WORD_CHECKSUM; i++)
+            checksum ^= record.words[i];
 
-    spin_lock_irqsave(&qdev->ring_lock, lock_flags);
+        if (checksum !=
+            record.words[QSTREAM_WORD_CHECKSUM]) {
+            dev_err_ratelimited(
+                &pdev->dev,
+                "qstream: checksum mismatch\n");
+        } else {
+            spin_lock_irqsave(&qdev->ring_lock,
+                              lock_flags);
 
-    if (qdev->head - qdev->tail >= QSTREAM_RING_CAPACITY) {
-        qdev->dropped++;
+            if (qdev->head - qdev->tail >=
+                QSTREAM_RING_CAPACITY) {
+                qdev->dropped++;
 
-        WRITE_ONCE(qdev->shared->header.dropped,
-                qdev->dropped);
-    } else {
-        qdev->shared->records[qdev->head &
-                            QSTREAM_RING_MASK] = record;
+                WRITE_ONCE(
+                    qdev->shared->header.dropped,
+                    qdev->dropped);
+            } else {
+                qdev->shared->records[
+                    qdev->head &
+                    QSTREAM_RING_MASK] = record;
 
-        qdev->head++;
+                qdev->head++;
 
-        smp_store_release(&qdev->shared->header.head,
-                        qdev->head);
+                smp_store_release(
+                    &qdev->shared->header.head,
+                    qdev->head);
 
-        stored = true;
-    }
+                wake_runtime = true;
+            }
 
-    spin_unlock_irqrestore(&qdev->ring_lock, lock_flags);
+            spin_unlock_irqrestore(
+                &qdev->ring_lock,
+                lock_flags);
+        }
 
-    if (stored)
-        wake_up_interruptible(&qdev->read_queue);
-    consume_record:
         iowrite32(QSTREAM_FIFO_POP_ONE,
-                bar0 + QSTREAM_REG_FIFO_POP);
+                  bar0 + QSTREAM_REG_FIFO_POP);
+    }
 
-        iowrite32(status,
-                bar0 + QSTREAM_REG_IRQ_ACK);
+    iowrite32(status,
+              bar0 + QSTREAM_REG_IRQ_ACK);
 
-        return IRQ_HANDLED;
+    if (wake_runtime)
+        wake_up_interruptible(&qdev->read_queue);
+
+    return IRQ_HANDLED;
 }
-
 
 static int qstream_probe(struct pci_dev *pdev,
                          const struct pci_device_id *id)
