@@ -57,10 +57,11 @@ static long qstream_ioctl(struct file *file,
 
     case QSTREAM_IOCTL_STOP:
         iowrite32(QSTREAM_CONTROL_STOP,
-                  qdev->bar0 + QSTREAM_REG_CONTROL);
+                qdev->bar0 + QSTREAM_REG_CONTROL);
+        synchronize_irq(qdev->pdev->irq);
 
         dev_info(&qdev->pdev->dev,
-                 "qstream: STOP requested by userspace\n");
+                "qstream: STOP requested by userspace\n");
         return 0;
     case QSTREAM_IOCTL_CONSUME: {
         __u32 count;
