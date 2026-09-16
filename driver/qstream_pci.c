@@ -324,7 +324,7 @@ static int qstream_probe(struct pci_dev *pdev,
     u32 scratch_value = 0x12345678;
     u32 scratch_response;
     int ret;
-    u32 stream_status;
+    //u32 stream_status;
     struct qstream_device *qdev;
 
     qdev = devm_kzalloc(&pdev->dev, sizeof(*qdev), GFP_KERNEL);

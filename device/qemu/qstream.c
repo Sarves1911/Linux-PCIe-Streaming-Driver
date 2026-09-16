@@ -6,6 +6,7 @@
 #include "qemu/timer.h"
 #define QSTREAM_STREAM_PERIOD_MS 250
 #define TYPE_QSTREAM_DEVICE "qstream"
+#define QSTREAM_RECORDS_PER_TICK 8u
 
 OBJECT_DECLARE_SIMPLE_TYPE(QStreamState, QSTREAM_DEVICE)
 
@@ -46,6 +47,9 @@ static void qstream_raise_irq(QStreamState *s, uint32_t bits)
 static void qstream_ack_irq(QStreamState *s, uint32_t bits)
 {
     s->irq_status &= ~bits;
+    if (s->fifo_head != s->fifo_tail)
+        s->irq_status |= QSTREAM_IRQ_DATA_READY;
+
     qstream_update_irq(s);
 }
 
@@ -155,11 +159,13 @@ static void qstream_schedule_next(QStreamState *s)
 static void qstream_timer_callback(void *opaque)
 {
     QStreamState *s = opaque;
+    unsigned int i;
 
     if (!s->running)
         return;
 
-    qstream_generate_one(s);
+    for (i = 0; i < QSTREAM_RECORDS_PER_TICK; i++)
+        qstream_generate_one(s);
 
     if (s->running)
         qstream_schedule_next(s);
