@@ -186,6 +186,22 @@ static void qstream_stop(QStreamState *s)
     timer_del(s->stream_timer);
 }
 
+static void qstream_reset(QStreamState *s)
+{
+    qstream_stop(s);
+
+    memset(s->fifo, 0, sizeof(s->fifo));
+
+    s->fifo_head = 0;
+    s->fifo_tail = 0;
+    s->next_sequence = 0;
+
+    s->generation++;
+
+    s->irq_status = 0;
+    qstream_update_irq(s);
+}
+
 static uint64_t qstream_mmio_read(void *opaque,
                                   hwaddr addr,
                                   unsigned size)
@@ -229,6 +245,9 @@ static uint64_t qstream_mmio_read(void *opaque,
     case QSTREAM_REG_STATUS:
         return s->running ? QSTREAM_STATUS_RUNNING : 0;
 
+    case QSTREAM_REG_GENERATION:
+        return s->generation;
+
     default:
         return ~0ULL;
     }
@@ -256,8 +275,12 @@ static void qstream_mmio_write(void *opaque,
     case QSTREAM_REG_IRQ_ACK:
         qstream_ack_irq(s, (uint32_t)value);
         break;
-
     case QSTREAM_REG_CONTROL:
+        if (value & QSTREAM_CONTROL_RESET) {
+            qstream_reset(s);
+            break;
+        }
+
         if (value & QSTREAM_CONTROL_GENERATE_ONE)
             qstream_generate_one(s);
 
@@ -267,7 +290,7 @@ static void qstream_mmio_write(void *opaque,
         if (value & QSTREAM_CONTROL_STOP)
             qstream_stop(s);
 
-    break;
+        break;
 
     case QSTREAM_REG_FIFO_POP:
         if (value & QSTREAM_FIFO_POP_ONE)

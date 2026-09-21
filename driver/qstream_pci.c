@@ -33,6 +33,7 @@ struct qstream_device {
     wait_queue_head_t read_queue;
     spinlock_t ring_lock;
     atomic_t is_open;
+    u32 generation;
 };
 
 static void qstream_free_shared_ring(void *data)
@@ -97,6 +98,42 @@ static long qstream_ioctl(struct file *file,
                             lock_flags);
 
         return 0;
+    case QSTREAM_IOCTL_RESET: {
+        unsigned long lock_flags;
+        u32 new_generation;
+
+        iowrite32(QSTREAM_CONTROL_RESET,
+                qdev->bar0 + QSTREAM_REG_CONTROL);
+
+        new_generation =
+            ioread32(qdev->bar0 + QSTREAM_REG_GENERATION);
+
+        synchronize_irq(qdev->pdev->irq);
+
+        spin_lock_irqsave(&qdev->ring_lock, lock_flags);
+
+        qdev->head = 0;
+        qdev->tail = 0;
+        qdev->dropped = 0;
+        qdev->generation = new_generation;
+
+        WRITE_ONCE(qdev->shared->header.head, 0);
+        WRITE_ONCE(qdev->shared->header.tail, 0);
+        WRITE_ONCE(qdev->shared->header.dropped, 0);
+
+        smp_store_release(
+            &qdev->shared->header.generation,
+            qdev->generation);
+
+        spin_unlock_irqrestore(&qdev->ring_lock,
+                            lock_flags);
+
+        dev_info(&qdev->pdev->dev,
+                "qstream: RESET completed, generation=%u\n",
+                qdev->generation);
+
+        return 0;
+    }
     }
     default:
         return -ENOTTY;
@@ -312,14 +349,21 @@ static irqreturn_t qstream_irq_handler(int irq, void *data)
             checksum ^= record.words[i];
 
         if (checksum !=
-            record.words[QSTREAM_WORD_CHECKSUM]) {
-            dev_err_ratelimited(
-                &pdev->dev,
-                "qstream: checksum mismatch\n");
-        } else {
-            spin_lock_irqsave(&qdev->ring_lock,
-                              lock_flags);
-
+    record.words[QSTREAM_WORD_CHECKSUM]) {
+        dev_err_ratelimited(
+            &pdev->dev,
+            "qstream: checksum mismatch\n");
+    } else if (record.words[QSTREAM_WORD_GENERATION] !=
+            READ_ONCE(qdev->generation)) {
+        dev_warn_ratelimited(
+            &pdev->dev,
+            "qstream: discarded stale generation %u, "
+            "expected %u\n",
+            record.words[QSTREAM_WORD_GENERATION],
+            READ_ONCE(qdev->generation));
+    } else {
+        spin_lock_irqsave(&qdev->ring_lock,
+                        lock_flags);
             if (qdev->head - qdev->tail >=
                 QSTREAM_RING_CAPACITY) {
                 qdev->dropped++;
@@ -394,6 +438,8 @@ static int qstream_probe(struct pci_dev *pdev,
     qdev->shared->header.capacity = QSTREAM_RING_CAPACITY;
     qdev->shared->header.record_size =
         sizeof(struct qstream_record);
+    
+        
 
     ret = pci_enable_device(pdev);
     if (ret) {
@@ -424,12 +470,22 @@ static int qstream_probe(struct pci_dev *pdev,
     magic = ioread32(bar0 + QSTREAM_REG_MAGIC);
     version = ioread32(bar0 + QSTREAM_REG_VERSION);
 
+    qdev->generation =
+    ioread32(bar0 + QSTREAM_REG_GENERATION);
+
+    WRITE_ONCE(qdev->shared->header.generation,
+           qdev->generation);
+
     iowrite32(scratch_value, bar0 + QSTREAM_REG_SCRATCH);
     scratch_response = ioread32(bar0 + QSTREAM_REG_SCRATCH);
 
     dev_info(&pdev->dev,
-            "qstream: magic=0x%08x version=0x%08x scratch=0x%08x\n",
-            magic, version, scratch_response);
+         "qstream: magic=0x%08x version=0x%08x "
+         "scratch=0x%08x generation=%u\n",
+         magic,
+         version,
+         scratch_response,
+         qdev->generation);
 
     ret = request_irq(pdev->irq,
                   qstream_irq_handler,

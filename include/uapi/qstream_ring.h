@@ -4,7 +4,7 @@
 #include <linux/types.h>
 
 #define QSTREAM_RING_MAGIC        0x51535247u
-#define QSTREAM_RING_VERSION      0x00010000u
+#define QSTREAM_RING_VERSION      0x00010001u
 
 #define QSTREAM_RING_CAPACITY     1024u
 #define QSTREAM_RING_MASK         (QSTREAM_RING_CAPACITY - 1u)
@@ -24,8 +24,11 @@ struct qstream_ring_header {
     __u64 head;
     __u64 tail;
     __u64 dropped;
+    __u32 generation;
+    __u32 reserved_word;
 
-    __u8 reserved[QSTREAM_RING_HEADER_SIZE - 40u];
+
+    __u8 reserved[QSTREAM_RING_HEADER_SIZE - 48u];
 };
 
 struct qstream_shared_ring {
