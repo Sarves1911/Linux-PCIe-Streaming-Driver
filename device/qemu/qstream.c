@@ -29,6 +29,8 @@ struct QStreamState {
     uint32_t generation;
     QEMUTimer *stream_timer;
     bool running;
+    uint64_t generated;
+    uint64_t hardware_drops;
 };
 static void qstream_update_irq(QStreamState *s)
 {
@@ -110,15 +112,18 @@ static void qstream_generate_one(QStreamState *s)
     uint64_t timestamp;
     uint64_t index;
 
-    if (qstream_fifo_full(s))
+    sequence = s->next_sequence++;
+
+    if (qstream_fifo_full(s)) {
+        s->hardware_drops++;
         return;
+    }
 
     index = s->fifo_head & QSTREAM_FIFO_MASK;
     record = &s->fifo[index];
 
     memset(record, 0, sizeof(*record));
 
-    sequence = s->next_sequence++;
     timestamp = (uint64_t)qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
 
     record->words[QSTREAM_WORD_SEQUENCE_LO] =
@@ -141,7 +146,7 @@ static void qstream_generate_one(QStreamState *s)
         qstream_record_checksum(record);
 
     s->fifo_head++;
-
+    s->generated++;
     qstream_raise_irq(s, QSTREAM_IRQ_DATA_READY);
 }
 
@@ -195,7 +200,8 @@ static void qstream_reset(QStreamState *s)
     s->fifo_head = 0;
     s->fifo_tail = 0;
     s->next_sequence = 0;
-
+    s->generated = 0;
+    s->hardware_drops = 0;
     s->generation++;
 
     s->irq_status = 0;
@@ -247,6 +253,18 @@ static uint64_t qstream_mmio_read(void *opaque,
 
     case QSTREAM_REG_GENERATION:
         return s->generation;
+    
+    case QSTREAM_REG_GENERATED_LO:
+        return (uint32_t)s->generated;
+
+    case QSTREAM_REG_GENERATED_HI:
+        return (uint32_t)(s->generated >> 32);
+
+    case QSTREAM_REG_HW_DROPS_LO:
+        return (uint32_t)s->hardware_drops;
+
+    case QSTREAM_REG_HW_DROPS_HI:
+        return (uint32_t)(s->hardware_drops >> 32);
 
     default:
         return ~0ULL;

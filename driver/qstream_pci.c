@@ -34,11 +34,31 @@ struct qstream_device {
     spinlock_t ring_lock;
     atomic_t is_open;
     u32 generation;
+    atomic64_t interrupts;
+    atomic64_t records_drained;
+    atomic64_t checksum_errors;
+    atomic64_t stale_records;
 };
 
 static void qstream_free_shared_ring(void *data)
 {
     vfree(data);
+}
+
+static u64 qstream_read_counter64(struct qstream_device *qdev,
+                                  u32 low_reg, u32 high_reg)
+{
+    u32 high_before;
+    u32 low;
+    u32 high_after;
+
+    do {
+        high_before = ioread32(qdev->bar0 + high_reg);
+        low = ioread32(qdev->bar0 + low_reg);
+        high_after = ioread32(qdev->bar0 + high_reg);
+    } while (high_before != high_after);
+
+    return ((u64)high_after << 32) | low;
 }
 
 static long qstream_ioctl(struct file *file,
@@ -109,6 +129,10 @@ static long qstream_ioctl(struct file *file,
             ioread32(qdev->bar0 + QSTREAM_REG_GENERATION);
 
         synchronize_irq(qdev->pdev->irq);
+        atomic64_set(&qdev->interrupts, 0);
+        atomic64_set(&qdev->records_drained, 0);
+        atomic64_set(&qdev->checksum_errors, 0);
+        atomic64_set(&qdev->stale_records, 0);
 
         spin_lock_irqsave(&qdev->ring_lock, lock_flags);
 
@@ -134,6 +158,38 @@ static long qstream_ioctl(struct file *file,
 
         return 0;
     }
+    case QSTREAM_IOCTL_GET_STATS:
+    {
+        struct qstream_stats stats = { 0 };
+        unsigned long flags;
+
+        stats.generated = qstream_read_counter64(
+            qdev, QSTREAM_REG_GENERATED_LO, QSTREAM_REG_GENERATED_HI);
+
+        stats.hardware_drops = qstream_read_counter64(
+            qdev, QSTREAM_REG_HW_DROPS_LO, QSTREAM_REG_HW_DROPS_HI);
+
+        stats.interrupts = atomic64_read(&qdev->interrupts);
+        stats.records_drained = atomic64_read(&qdev->records_drained);
+        stats.checksum_errors = atomic64_read(&qdev->checksum_errors);
+        stats.stale_records = atomic64_read(&qdev->stale_records);
+
+        spin_lock_irqsave(&qdev->ring_lock, flags);
+
+        stats.software_drops = qdev->dropped;
+        stats.records_stored = qdev->head;
+        stats.records_consumed = qdev->tail;
+        stats.records_pending = qdev->head - qdev->tail;
+        stats.generation = qdev->generation;
+
+        spin_unlock_irqrestore(&qdev->ring_lock, flags);
+
+        if (copy_to_user((void __user *)arg, &stats, sizeof(stats)))
+            return -EFAULT;
+
+        return 0;
+    }
+
     }
     default:
         return -ENOTTY;
@@ -328,6 +384,8 @@ static irqreturn_t qstream_irq_handler(int irq, void *data)
     if (!status)
         return IRQ_NONE;
 
+    atomic64_inc(&qdev->interrupts);
+
     for (drained = 0;
          drained < QSTREAM_IRQ_DRAIN_LIMIT;
          drained++) {
@@ -353,6 +411,7 @@ static irqreturn_t qstream_irq_handler(int irq, void *data)
         dev_err_ratelimited(
             &pdev->dev,
             "qstream: checksum mismatch\n");
+            atomic64_inc(&qdev->checksum_errors);
     } else if (record.words[QSTREAM_WORD_GENERATION] !=
             READ_ONCE(qdev->generation)) {
         dev_warn_ratelimited(
@@ -361,6 +420,7 @@ static irqreturn_t qstream_irq_handler(int irq, void *data)
             "expected %u\n",
             record.words[QSTREAM_WORD_GENERATION],
             READ_ONCE(qdev->generation));
+            atomic64_inc(&qdev->stale_records);
     } else {
         spin_lock_irqsave(&qdev->ring_lock,
                         lock_flags);
@@ -392,6 +452,7 @@ static irqreturn_t qstream_irq_handler(int irq, void *data)
 
         iowrite32(QSTREAM_FIFO_POP_ONE,
                   bar0 + QSTREAM_REG_FIFO_POP);
+        atomic64_inc(&qdev->records_drained);
     }
 
     iowrite32(status,
@@ -433,6 +494,10 @@ static int qstream_probe(struct pci_dev *pdev,
     init_waitqueue_head(&qdev->read_queue);
     spin_lock_init(&qdev->ring_lock);
     atomic_set(&qdev->is_open, 0);
+    atomic64_set(&qdev->interrupts, 0);
+    atomic64_set(&qdev->records_drained, 0);
+    atomic64_set(&qdev->checksum_errors, 0);
+    atomic64_set(&qdev->stale_records, 0);
     qdev->shared->header.magic = QSTREAM_RING_MAGIC;
     qdev->shared->header.version = QSTREAM_RING_VERSION;
     qdev->shared->header.capacity = QSTREAM_RING_CAPACITY;
