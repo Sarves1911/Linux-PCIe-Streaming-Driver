@@ -70,7 +70,12 @@ int main()
         close(fd);
         return 1;
     }
-
+    if (ioctl(fd, QSTREAM_IOCTL_RESET) < 0) {
+        perror("RESET");
+        munmap(mapping, QSTREAM_RING_MMAP_SIZE);
+        close(fd);
+        return 1;
+    }
     if (ioctl(fd, QSTREAM_IOCTL_START) < 0) {
         std::cerr << "START failed: "
                   << std::strerror(errno) << '\n';
