@@ -13,6 +13,7 @@
 #include <linux/mm.h>
 #include <linux/uaccess.h>
 #include <linux/spinlock.h>
+#include <linux/atomic.h>
 #define QSTREAM_IRQ_DRAIN_LIMIT 256u
 
 static const struct pci_device_id qstream_pci_ids[] = {
@@ -31,6 +32,7 @@ struct qstream_device {
     struct miscdevice miscdev;
     wait_queue_head_t read_queue;
     spinlock_t ring_lock;
+    atomic_t is_open;
 };
 
 static void qstream_free_shared_ring(void *data)
@@ -148,13 +150,54 @@ static int qstream_mmap(struct file *file,
     return remap_vmalloc_range(vma, qdev->shared, 0);
 }
 
+static int qstream_open(struct inode *inode,
+                        struct file *file)
+{
+    struct miscdevice *miscdev = file->private_data;
+    struct qstream_device *qdev =
+        container_of(miscdev,
+                     struct qstream_device,
+                     miscdev);
+    int ret;
+
+    if (atomic_cmpxchg(&qdev->is_open, 0, 1) != 0)
+        return -EBUSY;
+
+    ret = nonseekable_open(inode, file);
+    if (ret)
+        atomic_set(&qdev->is_open, 0);
+
+    return ret;
+}
+
+static int qstream_release(struct inode *inode,
+                           struct file *file)
+{
+    struct miscdevice *miscdev = file->private_data;
+    struct qstream_device *qdev =
+        container_of(miscdev,
+                     struct qstream_device,
+                     miscdev);
+
+    iowrite32(QSTREAM_CONTROL_STOP,
+              qdev->bar0 + QSTREAM_REG_CONTROL);
+
+    synchronize_irq(qdev->pdev->irq);
+
+    atomic_set(&qdev->is_open, 0);
+
+    return 0;
+}
+
 static const struct file_operations qstream_fops = {
     .owner = THIS_MODULE,
+    .open = qstream_open,
+    .release = qstream_release,
     .unlocked_ioctl = qstream_ioctl,
     .poll = qstream_poll,
     .mmap = qstream_mmap,
+    .llseek = no_llseek,
 };
-
 MODULE_DEVICE_TABLE(pci, qstream_pci_ids);
 
 // static irqreturn_t qstream_irq_handler(int irq, void *data)
@@ -345,7 +388,7 @@ static int qstream_probe(struct pci_dev *pdev,
     qdev->pdev = pdev;
     init_waitqueue_head(&qdev->read_queue);
     spin_lock_init(&qdev->ring_lock);
-
+    atomic_set(&qdev->is_open, 0);
     qdev->shared->header.magic = QSTREAM_RING_MAGIC;
     qdev->shared->header.version = QSTREAM_RING_VERSION;
     qdev->shared->header.capacity = QSTREAM_RING_CAPACITY;
