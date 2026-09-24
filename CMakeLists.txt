@@ -73,3 +73,11 @@ add_qstream_test(qstream_concurrent_test
 target_link_libraries(qstream_concurrent_test PRIVATE
     qstream_runtime
 )
+
+add_qstream_test(qstream_burst_test
+    tests/qstream_burst.cpp
+)
+
+target_link_libraries(qstream_burst_test PRIVATE
+    qstream_runtime
+)
