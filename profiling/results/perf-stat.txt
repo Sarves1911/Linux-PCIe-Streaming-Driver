@@ -1,0 +1,16 @@
+# started on Thu Sep 24 00:43:05 2026
+
+
+ Performance counter stats for '/tmp/qstream-build/qstream_concurrent_test':
+
+            137.63 msec task-clock                       #    0.017 CPUs utilized             
+               278      context-switches                 #    2.020 K/sec                     
+                25      cpu-migrations                   #  181.643 /sec                      
+               151      page-faults                      #    1.097 K/sec                     
+
+       8.162432507 seconds time elapsed
+
+       0.073461000 seconds user
+       0.098363000 seconds sys
+
+

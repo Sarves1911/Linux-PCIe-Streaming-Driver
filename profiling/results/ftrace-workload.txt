@@ -1,0 +1,4 @@
+Waiting for qstream data
+Received 8 records; first sequence=0
+generated=8 drained=8 stored=8 consumed=8 pending=0
+RUNTIME TEST PASSED

@@ -1,0 +1,6 @@
+consumer[0] processed=64
+consumer[1] processed=64
+consumer[2] processed=64
+consumer[3] processed=64
+processed=256 checksum_errors=0 generation_errors=0 sequence_errors=0 interrupts=32 kernel_pending=0 userspace_queued=0
+CONCURRENT CONSUMER TEST PASSED

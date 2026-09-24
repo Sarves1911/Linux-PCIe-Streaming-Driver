@@ -1,0 +1,13 @@
+# tracer: function_graph
+#
+# CPU  DURATION                  FUNCTION CALLS
+# |     |   |                     |   |   |   |
+ 0) ! 968.390 us  |  qstream_mmap [qstream_pci]();
+ 0) ! 138.861 us  |  qstream_ioctl [qstream_pci]();
+ 0) + 35.149 us   |  qstream_ioctl [qstream_pci]();
+ 0) + 25.811 us   |  qstream_poll [qstream_pci]();
+ 1) ! 284.154 us  |  qstream_irq_handler [qstream_pci]();
+ 0) ! 168.649 us  |  qstream_poll [qstream_pci]();
+ 0) + 11.723 us   |  qstream_ioctl [qstream_pci]();
+ 0) + 85.126 us   |  qstream_ioctl [qstream_pci]();
+ 0)   8.787 us    |  qstream_ioctl [qstream_pci]();
