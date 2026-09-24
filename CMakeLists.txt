@@ -1,9 +1,15 @@
 cmake_minimum_required(VERSION 3.20)
 
 project(qstream LANGUAGES CXX)
+find_package(Threads REQUIRED)
 
 add_library(qstream_runtime STATIC
     runtime/qstream_runtime.cpp
+    runtime/qstream_threaded_runtime.cpp
+)
+
+target_link_libraries(qstream_runtime PUBLIC
+    Threads::Threads
 )
 
 target_compile_features(qstream_runtime PUBLIC cxx_std_17)
@@ -57,5 +63,13 @@ add_qstream_test(qstream_runtime_test
 )
 
 target_link_libraries(qstream_runtime_test PRIVATE
+    qstream_runtime
+)
+
+add_qstream_test(qstream_concurrent_test
+    tests/qstream_concurrent.cpp
+)
+
+target_link_libraries(qstream_concurrent_test PRIVATE
     qstream_runtime
 )
