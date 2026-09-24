@@ -118,6 +118,7 @@ static long qstream_ioctl(struct file *file,
                             lock_flags);
 
         return 0;
+        }
     case QSTREAM_IOCTL_RESET: {
         unsigned long lock_flags;
         u32 new_generation;
@@ -188,7 +189,6 @@ static long qstream_ioctl(struct file *file,
             return -EFAULT;
 
         return 0;
-    }
 
     }
     default:
